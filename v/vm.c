@@ -63,9 +63,10 @@ void wtf()
 #define l1pt pt[0]
 #define user_l2pt pt[1]
 #if __riscv_xlen == 64
-# define NPT 4
-#define kernel_l2pt pt[2]
-# define user_l3pt pt[3]
+# define NPT 5
+#define ext_io_l2pt pt[2]
+#define kernel_l2pt pt[3]
+#define user_l3pt pt[4]
 #else
 # define NPT 2
 # define user_l3pt user_l2pt
@@ -215,15 +216,24 @@ void vm_boot(uintptr_t test_addr)
 
   _Static_assert(SIZEOF_TRAPFRAME_T == sizeof(trapframe_t), "???");
 
-#if (MAX_TEST_PAGES > PTES_PER_PT) || (DRAM_BASE % MEGAPAGE_SIZE) != 0
+#if (MAX_TEST_PAGES > PTES_PER_PT) || (DRAM_BASE % MEGAPAGE_SIZE) != 0 || (EXT_IO_BASE % MEGAPAGE_SIZE) != 0
 # error
 #endif
   // map user to lowermost megapage
   l1pt[0] = ((pte_t)user_l2pt >> PGSHIFT << PTE_PPN_SHIFT) | PTE_V;
-  // map kernel to uppermost megapage
+  // map dram to uppermost megapage
 #if __riscv_xlen == 64
   l1pt[PTES_PER_PT-1] = ((pte_t)kernel_l2pt >> PGSHIFT << PTE_PPN_SHIFT) | PTE_V;
   kernel_l2pt[PTES_PER_PT-1] = (DRAM_BASE/RISCV_PGSIZE << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+  // map EXT_IO to megapage at appropriate offset in virtual memory
+  #define VPN2(v) ((v >> 2*RISCV_PGLEVEL_BITS+RISCV_PGSHIFT) & (~0ULL >> 64-RISCV_PGLEVEL_BITS))
+  #define VPN1(v) ((v >> RISCV_PGLEVEL_BITS+RISCV_PGSHIFT) & (~0ULL >> 64-RISCV_PGLEVEL_BITS))
+  assert(DRAM_BASE >= EXT_IO_BASE + MEGAPAGE_SIZE);
+  uint64_t dram_vaddr = (((PTES_PER_PT-1) << RISCV_PGLEVEL_BITS) |
+       (PTES_PER_PT-1)) << (RISCV_PGLEVEL_BITS+RISCV_PGSHIFT);
+  uint64_t ext_io_vaddr = dram_vaddr - (DRAM_BASE-EXT_IO_BASE);
+  l1pt[VPN2(ext_io_vaddr)] = ((pte_t)ext_io_l2pt >> PGSHIFT << PTE_PPN_SHIFT) | PTE_V;
+  ext_io_l2pt[VPN1(ext_io_vaddr)] = (EXT_IO_BASE/RISCV_PGSIZE << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
   user_l2pt[0] = ((pte_t)user_l3pt >> PGSHIFT << PTE_PPN_SHIFT) | PTE_V;
   uintptr_t vm_choice = SATP_MODE_SV39;
 #else
