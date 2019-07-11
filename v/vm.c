@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "riscv_test.h"
+#include "flush_cache.h"
 
 void trap_entry();
 void pop_tf(trapframe_t*);
@@ -157,7 +158,11 @@ void handle_fault(uintptr_t addr, uintptr_t cause)
   user_l3pt[addr/PGSIZE] = new_pte;
   flush_page(addr);
 
+#ifdef __gnu_linux__
+  riscv_clear_cache();
+#else
   __builtin___clear_cache(0,0);
+#endif
 }
 
 void handle_trap(trapframe_t* tf)
