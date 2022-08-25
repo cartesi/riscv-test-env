@@ -4,6 +4,12 @@
 #include <string.h>
 #include <stdio.h>
 
+#define HTIF_DEV_HALT 0
+#define HTIF_DEV_CONSOLE 1
+
+#define HTIF_HALT_CMD_HALT 0
+#define HTIF_CONSOLE_CMD_PUTCHAR 1
+
 #include "riscv_test.h"
 
 #define SYS_write 64
@@ -22,11 +28,9 @@ void pop_tf(trapframe_t*);
 extern volatile uint64_t tohost;
 extern volatile uint64_t fromhost;
 
-static void do_tohost(uint64_t tohost_value)
+static void do_tohost(uint64_t dev, uint64_t cmd, uint64_t data)
 {
-  while (tohost)
-    fromhost = 0;
-  tohost = tohost_value;
+  tohost = (((dev) << 56UL) | (((cmd) & 0xff) << 48UL) | (((data) & 0xffffffffffUL)));
 }
 
 #define kaa2pa(aa) ((uintptr_t)(aa) & (uintptr_t)(~(-MEGAPAGE_SIZE)) | (uintptr_t)(DRAM_BASE))
@@ -55,7 +59,7 @@ static void cputchar(int x)
   // Wait for response as struct has to be read by HTIF
   while(!fromhost);
 #else
-  do_tohost(0x0101000000000000 | (unsigned char)x);
+  do_tohost(HTIF_DEV_CONSOLE, HTIF_CONSOLE_CMD_PUTCHAR, (unsigned char)x);
 #endif
 }
 
@@ -67,7 +71,7 @@ static void cputstring(const char* s)
 
 static void terminate(int code)
 {
-  do_tohost(code);
+  do_tohost(HTIF_DEV_HALT, HTIF_HALT_CMD_HALT, (((uint64_t)code) << 1) | 1);
   while (1);
 }
 
@@ -93,9 +97,10 @@ void wtf()
 # define user_l3pt pt[4]
 # define user_llpt pt[5]
 #elif SATP_MODE_CHOICE == SATP_MODE_SV39
-# define NPT 4
-# define kernel_l2pt pt[2]
-# define user_llpt pt[3]
+# define NPT 5
+# define ext_io_l2pt pt[2]
+# define kernel_l2pt pt[3]
+# define user_llpt pt[4]
 #elif SATP_MODE_CHOICE == SATP_MODE_SV32
 # define NPT 2
 # define user_llpt user_l2pt
@@ -262,7 +267,7 @@ void vm_boot(uintptr_t test_addr)
 
   _Static_assert(SIZEOF_TRAPFRAME_T == sizeof(trapframe_t), "???");
 
-#if (MAX_TEST_PAGES > PTES_PER_PT) || (DRAM_BASE % MEGAPAGE_SIZE) != 0
+#if (MAX_TEST_PAGES > PTES_PER_PT) || (DRAM_BASE % MEGAPAGE_SIZE) != 0 || (EXT_IO_BASE % MEGAPAGE_SIZE) != 0
 # error
 #endif
   // map user to lowermost megapage
@@ -277,6 +282,15 @@ void vm_boot(uintptr_t test_addr)
 #elif SATP_MODE_CHOICE == SATP_MODE_SV39
   l1pt[PTES_PER_PT-1] = ((pte_t)kernel_l2pt >> PGSHIFT << PTE_PPN_SHIFT) | PTE_V;
   kernel_l2pt[PTES_PER_PT-1] = (DRAM_BASE/RISCV_PGSIZE << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+  // map EXT_IO to megapage at appropriate offset in virtual memory
+  #define VPN2(v) ((v >> 2*RISCV_PGLEVEL_BITS+RISCV_PGSHIFT) & (~0ULL >> 64-RISCV_PGLEVEL_BITS))
+  #define VPN1(v) ((v >> RISCV_PGLEVEL_BITS+RISCV_PGSHIFT) & (~0ULL >> 64-RISCV_PGLEVEL_BITS))
+  assert(DRAM_BASE >= EXT_IO_BASE + MEGAPAGE_SIZE);
+  uint64_t dram_vaddr = (((PTES_PER_PT-1) << RISCV_PGLEVEL_BITS) |
+       (PTES_PER_PT-1)) << (RISCV_PGLEVEL_BITS+RISCV_PGSHIFT);
+  uint64_t ext_io_vaddr = dram_vaddr - (DRAM_BASE-EXT_IO_BASE);
+  l1pt[VPN2(ext_io_vaddr)] = ((pte_t)ext_io_l2pt >> PGSHIFT << PTE_PPN_SHIFT) | PTE_V;
+  ext_io_l2pt[VPN1(ext_io_vaddr)] = (EXT_IO_BASE/RISCV_PGSIZE << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
   user_l2pt[0] = ((pte_t)user_llpt >> PGSHIFT << PTE_PPN_SHIFT) | PTE_V;
 #elif SATP_MODE_CHOICE == SATP_MODE_SV32
   l1pt[PTES_PER_PT-1] = (DRAM_BASE/RISCV_PGSIZE << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
